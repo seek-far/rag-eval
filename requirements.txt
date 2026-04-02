@@ -1,0 +1,20 @@
+# Core ML
+sentence-transformers>=2.7.0
+faiss-cpu>=1.8.0           # swap for faiss-gpu if using CUDA
+torch>=2.2.0               # CPU build by default; see README for GPU install
+transformers>=4.40.0
+
+# Retrieval
+rank-bm25>=0.2.2
+
+# Datasets
+datasets>=2.19.0,<3.0.0
+huggingface-hub>=0.23.0
+
+# Eval
+bert-score>=0.3.13         # optional — BERTScore answer metric
+
+# Config / utils
+python-dotenv>=1.0.0
+tqdm>=4.66.0
+numpy>=1.26.0

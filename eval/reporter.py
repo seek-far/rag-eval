@@ -79,7 +79,7 @@ def _print_table(jsonl_path: Path) -> None:
                 seen.add(k)
 
     cfg_cols = ["run_name", "dataset", "chunk_strategy",
-                "embed_model", "retrieval_mode", "reranker"]
+                "embed_model", "retrieval_mode", "reranker", "reranker_model"]
     header = cfg_cols + metric_keys
 
     # Column widths
@@ -93,6 +93,7 @@ def _print_table(jsonl_path: Path) -> None:
             "embed_model": c.get("embed_model", "").split("/")[-1],
             "retrieval_mode": c.get("retrieval_mode", ""),
             "reranker": c.get("reranker", ""),
+            "reranker_model": c.get("reranker_model", "").split("/")[-1],
         }
         for h in cfg_cols:
             widths[h] = max(widths[h], len(str(vals.get(h, ""))))
@@ -117,6 +118,7 @@ def _print_table(jsonl_path: Path) -> None:
             c.get("embed_model", "").split("/")[-1],
             c.get("retrieval_mode", ""),
             c.get("reranker", ""),
+            c.get("reranker_model", "").split("/")[-1],
         ]
         metric_vals = [
             f"{r['metrics'].get(k, 0):.4f}" for k in metric_keys

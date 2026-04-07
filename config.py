@@ -19,6 +19,14 @@ def _list_int(key: str, default: str) -> list[int]:
     return [int(x) for x in os.getenv(key, default).split(",")]
 
 
+def _parse_device_list(raw: str | None, fallback: str) -> list[str]:
+    if raw:
+        devices = [item.strip() for item in raw.split(",") if item.strip()]
+        if devices:
+            return devices
+    return [fallback]
+
+
 def _parse_sample_batches() -> list[tuple[int, int]]:
     """Parse DATASET_SAMPLE, DATASET_SAMPLE_2, ... into [(start, end), ...]."""
     base = int(os.getenv("DATASET_SAMPLE", "200"))
@@ -53,8 +61,14 @@ class Config:
 
     # ── Embedding ────────────────────────────────────────────────────────────
     embed_model: str = os.getenv("EMBED_MODEL", "BAAI/bge-large-en-v1.5")
-    embed_batch: int = int(os.getenv("EMBED_BATCH_SIZE", "64"))
+    embed_batch: str = os.getenv("EMBED_BATCH_SIZE", "64")
     embed_device: str = os.getenv("EMBED_DEVICE", "cpu")
+    embed_devices_raw: str = os.getenv("EMBED_DEVICES", "")
+    embed_batch_min: int = int(os.getenv("EMBED_BATCH_MIN", "8"))
+    embed_batch_max: int = int(os.getenv("EMBED_BATCH_MAX", "512"))
+    embed_batch_utilization: float = float(
+        os.getenv("EMBED_BATCH_UTILIZATION", "0.85")
+    )
 
     # ── Retrieval ────────────────────────────────────────────────────────────
     retrieval_mode: str = os.getenv("RETRIEVAL_MODE", "hybrid")
@@ -91,6 +105,13 @@ class Config:
             self.metrics = _list_str("EVAL_METRICS", "mrr,ndcg,hit,recall,f1,bertscore")
         if isinstance(self.k_values, list) and self.k_values == []:
             self.k_values = _list_int("EVAL_K_VALUES", "1,3,5,10")
+        self.embed_devices = _parse_device_list(self.embed_devices_raw, self.embed_device)
+        raw_batch = str(self.embed_batch).strip()
+        self.embed_batch_is_auto = raw_batch.lower() == "auto"
+        self.embed_batch = 32 if self.embed_batch_is_auto else int(raw_batch)
+        self.embed_batch_min = max(1, self.embed_batch_min)
+        self.embed_batch_max = max(self.embed_batch_min, self.embed_batch_max)
+        self.embed_batch_utilization = min(max(self.embed_batch_utilization, 0.1), 0.98)
 
     @property
     def _chunk_params_tag(self) -> str:
@@ -130,6 +151,8 @@ class Config:
 
     def summary(self) -> str:
         batch_desc = " + ".join(f"{e-s}" for s, e in self.sample_batches)
+        device_desc = ",".join(self.embed_devices)
+        batch_desc_embed = "auto" if self.embed_batch_is_auto else str(self.embed_batch)
         return (
             f"  dataset        : {self.dataset} / {self.split} "
             f"(samples={batch_desc}, total={self.total_samples})\n"
@@ -137,7 +160,7 @@ class Config:
             f"(size={self.chunk_size}, overlap={self.chunk_overlap}, "
             f"threshold={self.semantic_threshold})\n"
             f"  embed_model    : {self.embed_model} "
-            f"(device={self.embed_device}, batch={self.embed_batch})\n"
+            f"(device={self.embed_device}, devices={device_desc}, batch={batch_desc_embed})\n"
             f"  retrieval      : {self.retrieval_mode} "
             f"(k={self.retrieve_k}, rrf_k={self.rrf_k}, "
             f"dense={self.dense_weight}, sparse={self.sparse_weight})\n"

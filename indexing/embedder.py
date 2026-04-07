@@ -12,7 +12,8 @@ from pathlib import Path
 
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+
+from indexing.encoder_runtime import SentenceEncoderRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -26,16 +27,38 @@ class Embedder:
     def __init__(self, cfg):
         self.model_name = cfg.embed_model
         self.device = cfg.embed_device
+        self.devices = cfg.embed_devices
         self.batch_size = cfg.embed_batch
         self.cache_dir = Path(cfg.embed_cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("Loading embedding model '%s' on %s ...", self.model_name, self.device)
-        self.model = SentenceTransformer(self.model_name, device=self.device)
+        logger.info(
+            "Loading embedding model '%s' on %s ...",
+            self.model_name,
+            ",".join(self.devices),
+        )
+        self.runtime = SentenceEncoderRuntime(
+            model_name=self.model_name,
+            primary_device=self.devices[0],
+            devices=self.devices,
+            batch_size=self.batch_size,
+            auto_batch=cfg.embed_batch_is_auto,
+            batch_min=cfg.embed_batch_min,
+            batch_max=cfg.embed_batch_max,
+            batch_utilization=cfg.embed_batch_utilization,
+            stage_name="embedding",
+            keep_primary_model=True,
+        )
 
         self._vectors: np.ndarray | None = None
         self._chunk_ids: list[str] = []
         self._index: faiss.IndexFlatIP | None = None
+
+    def __del__(self) -> None:
+        try:
+            self.runtime.close()
+        except Exception:
+            pass
 
     # ── Encoding ──────────────────────────────────────────────────────────
 
@@ -61,12 +84,10 @@ class Embedder:
                 "Encoding %d new passages (%d cached) with '%s' ...",
                 len(missing), len(chunks) - len(missing), self.model_name,
             )
-            new_vecs = self.model.encode(
+            new_vecs = self.runtime.encode(
                 texts,
-                batch_size=self.batch_size,
-                show_progress_bar=True,
-                convert_to_numpy=True,
                 normalize_embeddings=True,
+                show_progress_bar=True,
             ).astype("float32")
 
             for c, v in zip(missing, new_vecs):
@@ -84,12 +105,10 @@ class Embedder:
     def encode_query(self, query: str) -> np.ndarray:
         """Encode a single query string. Returns (D,) float32 array."""
         text = self._query_text(query)
-        vec = self.model.encode(
-            [text],
-            show_progress_bar=False,
-            convert_to_numpy=True,
+        vec = self.runtime.encode_one(
+            text,
             normalize_embeddings=True,
-        )[0].astype("float32")
+        ).astype("float32")
         return vec
 
     # ── FAISS index ───────────────────────────────────────────────────────
@@ -132,4 +151,3 @@ class Embedder:
         if "e5" in name:
             return _E5_PASSAGE_PREFIX + text
         return text
-

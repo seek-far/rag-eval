@@ -15,7 +15,8 @@ from __future__ import annotations
 import re
 import logging
 import numpy as np
-from sentence_transformers import SentenceTransformer
+
+from indexing.encoder_runtime import SentenceEncoderRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,12 @@ def create_chunker(cfg):
         return _SemanticChunker(
             cfg.embed_model,
             cfg.embed_device,
+            cfg.embed_devices,
+            cfg.embed_batch,
+            cfg.embed_batch_is_auto,
+            cfg.embed_batch_min,
+            cfg.embed_batch_max,
+            cfg.embed_batch_utilization,
             cfg.semantic_threshold,
             cfg.chunk_min_chars,
             cfg.chunk_max_chars,
@@ -58,6 +65,12 @@ def create_chunker(cfg):
         return _SectionSemanticChunker(
             cfg.embed_model,
             cfg.embed_device,
+            cfg.embed_devices,
+            cfg.embed_batch,
+            cfg.embed_batch_is_auto,
+            cfg.embed_batch_min,
+            cfg.embed_batch_max,
+            cfg.embed_batch_utilization,
             cfg.semantic_threshold,
             cfg.chunk_min_chars,
             cfg.chunk_max_chars,
@@ -82,6 +95,16 @@ def build_chunks(
     """
     if chunker is None:
         chunker = create_chunker(cfg)
+
+    if hasattr(chunker, "batch_chunk"):
+        all_chunks = chunker.batch_chunk(documents)
+        logger.debug(
+            "Built %d chunks from %d documents (strategy=%s)",
+            len(all_chunks),
+            len(documents),
+            cfg.chunk_strategy,
+        )
+        return all_chunks
 
     all_chunks = []
     for doc in documents:
@@ -172,11 +195,27 @@ class _SemanticChunker:
         self,
         model_name: str,
         device: str,
+        devices: list[str],
+        batch_size: int,
+        auto_batch: bool,
+        batch_min: int,
+        batch_max: int,
+        batch_utilization: float,
         threshold: float,
         min_chars: int,
         max_chars: int,
     ):
-        self.model = SentenceTransformer(model_name, device=device)
+        self.runtime = SentenceEncoderRuntime(
+            model_name=model_name,
+            primary_device=devices[0] if devices else device,
+            devices=devices or [device],
+            batch_size=batch_size,
+            auto_batch=auto_batch,
+            batch_min=batch_min,
+            batch_max=batch_max,
+            batch_utilization=batch_utilization,
+            stage_name="semantic chunking",
+        )
         self.threshold = threshold
         self.min_chars = min_chars
         self.max_chars = max_chars
@@ -186,14 +225,72 @@ class _SemanticChunker:
         if len(sentences) <= 2:
             return [_make_chunk(doc_id, text, "body", text, 0, text)]
 
-        embeddings = self.model.encode(
-            sentences, show_progress_bar=False, convert_to_numpy=True
+        embeddings = self.runtime.encode(
+            sentences,
+            normalize_embeddings=False,
+            show_progress_bar=False,
         )
         groups = self._group(sentences, embeddings)
         return [
             _make_chunk(doc_id, text, "body", text, i, " ".join(g))
             for i, g in enumerate(groups)
         ]
+
+    def batch_chunk(self, documents: list[dict]) -> list[dict]:
+        prepared = []
+        batched_sentences: list[str] = []
+
+        for doc in documents:
+            text = doc["text"]
+            sentences = _split_sentences(text)
+            prepared.append(
+                {
+                    "doc_id": doc["id"],
+                    "doc_text": text,
+                    "sentences": sentences,
+                }
+            )
+            if len(sentences) > 2:
+                batched_sentences.extend(sentences)
+
+        batched_embeddings = self._encode_sentences(batched_sentences)
+        cursor = 0
+        all_chunks: list[dict] = []
+
+        for item in prepared:
+            doc_id = item["doc_id"]
+            doc_text = item["doc_text"]
+            sentences = item["sentences"]
+
+            if len(sentences) <= 2:
+                all_chunks.append(_make_chunk(doc_id, doc_text, "body", doc_text, 0, doc_text))
+                continue
+
+            next_cursor = cursor + len(sentences)
+            doc_embeddings = batched_embeddings[cursor:next_cursor]
+            cursor = next_cursor
+            groups = self._group(sentences, doc_embeddings)
+            all_chunks.extend(
+                _make_chunk(doc_id, doc_text, "body", doc_text, i, " ".join(g))
+                for i, g in enumerate(groups)
+            )
+
+        return all_chunks
+
+    def __del__(self) -> None:
+        try:
+            self.runtime.close()
+        except Exception:
+            pass
+
+    def _encode_sentences(self, sentences: list[str]) -> np.ndarray:
+        if not sentences:
+            return np.empty((0, 0), dtype="float32")
+        return self.runtime.encode(
+            sentences,
+            normalize_embeddings=False,
+            show_progress_bar=False,
+        )
 
     def _group(
         self, sentences: list[str], embeddings: np.ndarray
@@ -240,12 +337,28 @@ class _SectionSemanticChunker:
         self,
         model_name: str,
         device: str,
+        devices: list[str],
+        batch_size: int,
+        auto_batch: bool,
+        batch_min: int,
+        batch_max: int,
+        batch_utilization: float,
         threshold: float,
         min_chars: int,
         max_chars: int,
     ):
         self._sem = _SemanticChunker(
-            model_name, device, threshold, min_chars, max_chars
+            model_name,
+            device,
+            devices,
+            batch_size,
+            auto_batch,
+            batch_min,
+            batch_max,
+            batch_utilization,
+            threshold,
+            min_chars,
+            max_chars,
         )
 
     def chunk(self, text: str, doc_id: str) -> list[dict]:
@@ -264,8 +377,10 @@ class _SectionSemanticChunker:
                 )
                 chunk_idx += 1
                 continue
-            embeddings = self._sem.model.encode(
-                sentences, show_progress_bar=False, convert_to_numpy=True
+            embeddings = self._sem.runtime.encode(
+                sentences,
+                normalize_embeddings=False,
+                show_progress_bar=False,
             )
             groups = self._sem._group(sentences, embeddings)
             for g in groups:
@@ -276,6 +391,87 @@ class _SectionSemanticChunker:
                 )
                 chunk_idx += 1
         return all_chunks
+
+    def batch_chunk(self, documents: list[dict]) -> list[dict]:
+        prepared = []
+        batched_sentences: list[str] = []
+
+        for doc in documents:
+            doc_id = doc["id"]
+            doc_text = doc["text"]
+            sections = []
+            for sec_type, sec_text in _split_sections(doc_text):
+                if sec_type in _SKIP_SECTIONS:
+                    continue
+                sentences = _split_sentences(sec_text)
+                sections.append(
+                    {
+                        "section_type": sec_type,
+                        "section_text": sec_text,
+                        "sentences": sentences,
+                    }
+                )
+                if len(sentences) > 2:
+                    batched_sentences.extend(sentences)
+            prepared.append(
+                {
+                    "doc_id": doc_id,
+                    "doc_text": doc_text,
+                    "sections": sections,
+                }
+            )
+
+        batched_embeddings = self._sem._encode_sentences(batched_sentences)
+        cursor = 0
+        all_chunks: list[dict] = []
+
+        for item in prepared:
+            chunk_idx = 0
+            for section in item["sections"]:
+                sec_type = section["section_type"]
+                sec_text = section["section_text"]
+                sentences = section["sentences"]
+
+                if not sentences:
+                    continue
+                if len(sentences) <= 2:
+                    all_chunks.append(
+                        _make_chunk(
+                            item["doc_id"],
+                            item["doc_text"],
+                            sec_type,
+                            sec_text,
+                            chunk_idx,
+                            sec_text,
+                        )
+                    )
+                    chunk_idx += 1
+                    continue
+
+                next_cursor = cursor + len(sentences)
+                section_embeddings = batched_embeddings[cursor:next_cursor]
+                cursor = next_cursor
+                groups = self._sem._group(sentences, section_embeddings)
+                for group in groups:
+                    all_chunks.append(
+                        _make_chunk(
+                            item["doc_id"],
+                            item["doc_text"],
+                            sec_type,
+                            sec_text,
+                            chunk_idx,
+                            " ".join(group),
+                        )
+                    )
+                    chunk_idx += 1
+
+        return all_chunks
+
+    def __del__(self) -> None:
+        try:
+            self._sem.runtime.close()
+        except Exception:
+            pass
 
 
 # ─────────────────────────── Helpers ──────────────────────────────────────

@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from config import Config
 from dataloader.loader import load_eval_samples
-from indexing.chunker import build_chunks
+from indexing.chunker import build_chunks, create_chunker
 from indexing.embedder import Embedder
 from indexing.bm25_index import BM25Index
 from retrieval.hybrid import HybridRetriever
@@ -25,7 +25,7 @@ from eval.answer_metrics import compute_answer_metrics
 from eval.reporter import aggregate, save_run
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s  %(levelname)-7s  %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -47,31 +47,47 @@ def main() -> None:
     print(cfg.summary())
 
     # ── 1. Load dataset ───────────────────────────────────────────────────
-    samples = load_eval_samples(cfg.dataset, cfg.split, cfg.sample)
-    logger.info("Evaluating on %d samples.", len(samples))
+    all_samples = load_eval_samples(cfg.dataset, cfg.split, cfg.total_samples)
+    samples = all_samples[: cfg.total_samples]
+    logger.info("Evaluating on %d samples (%d batches).",
+                len(samples), len(cfg.sample_batches))
 
-    # ── 2. Build chunk corpus (with disk cache) ────────────────────────────
-    chunk_cache_path = cfg.chunk_cache_dir / "chunks.pkl"
-    if chunk_cache_path.exists():
-        logger.info("Chunk cache hit: %s", chunk_cache_path)
-        with open(chunk_cache_path, "rb") as f:
-            unique_chunks = pickle.load(f)
-    else:
-        logger.info("Chunking documents (strategy=%s) ...", cfg.chunk_strategy)
-        all_chunks: list[dict] = []
-        for sample in tqdm(samples, desc="Chunking", unit="sample"):
-            chunks = build_chunks(sample.documents, cfg)
-            all_chunks.extend(chunks)
+    # ── 2. Build chunk corpus (per-batch caching) ─────────────────────────
+    cfg.chunk_cache_dir.mkdir(parents=True, exist_ok=True)
+    chunk_map: dict[str, dict] = {}
+    chunker = None  # lazy init, only if needed
 
-        # Deduplicate by chunk_id (same doc can appear in multiple samples)
-        unique_chunks = list({c["chunk_id"]: c for c in all_chunks}.values())
+    for batch_start, batch_end in cfg.sample_batches:
+        cache_path = cfg.chunk_cache_dir / f"batch_{batch_start}_{batch_end}.pkl"
+        if cache_path.exists():
+            logger.info("Chunk cache hit: %s", cache_path.name)
+            with open(cache_path, "rb") as f:
+                batch_chunks = pickle.load(f)
+        else:
+            batch_samples = samples[batch_start:batch_end]
+            logger.info(
+                "Chunking batch [%d:%d] (%d samples, strategy=%s) ...",
+                batch_start, batch_end, len(batch_samples), cfg.chunk_strategy,
+            )
+            if chunker is None:
+                chunker = create_chunker(cfg)
+            all_chunks: list[dict] = []
+            for sample in tqdm(batch_samples, desc=f"Chunking [{batch_start}:{batch_end}]",
+                               unit="sample"):
+                chunks = build_chunks(sample.documents, cfg, chunker=chunker)
+                all_chunks.extend(chunks)
+            batch_chunks = list({c["chunk_id"]: c for c in all_chunks}.values())
+            if batch_chunks:
+                with open(cache_path, "wb") as f:
+                    pickle.dump(batch_chunks, f)
+                logger.info("Saved chunk cache: %s (%d chunks)", cache_path.name, len(batch_chunks))
+            else:
+                logger.warning("Batch [%d:%d] produced 0 chunks, skipping cache.", batch_start, batch_end)
 
-        cfg.chunk_cache_dir.mkdir(parents=True, exist_ok=True)
-        with open(chunk_cache_path, "wb") as f:
-            pickle.dump(unique_chunks, f)
-        logger.info("Saved chunk cache to %s", chunk_cache_path)
+        for c in batch_chunks:
+            chunk_map.setdefault(c["chunk_id"], c)
 
-    chunk_map: dict[str, dict] = {c["chunk_id"]: c for c in unique_chunks}
+    unique_chunks = list(chunk_map.values())
     logger.info("Total unique chunks: %d", len(unique_chunks))
 
     # ── 3. Build indices ──────────────────────────────────────────────────
@@ -81,7 +97,7 @@ def main() -> None:
     bm25 = BM25Index(unique_chunks)
 
     retriever = HybridRetriever(embedder, bm25, cfg)
-    reranker = Reranker(cfg)
+    reranker = Reranker(cfg) if cfg.reranker != "none" else None
 
     # ── 4. Evaluate ───────────────────────────────────────────────────────
     per_sample_results: list[dict] = []
@@ -91,7 +107,7 @@ def main() -> None:
         candidates = retriever.retrieve(sample.query, chunk_map)
 
         # Rerank
-        if cfg.reranker != "none":
+        if reranker is not None:
             candidates = reranker.rerank(sample.query, candidates)
             candidates = candidates[: cfg.rerank_top_k]
 

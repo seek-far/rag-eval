@@ -1,7 +1,8 @@
 """
-chunker.py — Three chunking strategies controlled via Config.
+chunker.py — Chunking strategies controlled via Config.
 
   fixed               : split by token count with overlap
+  sentence            : split at sentence boundaries, group by size (no embedding)
   semantic            : split at cosine-similarity drop points
   section_then_semantic : detect section headers first, then semantic-split
                          each section (best for ArXiv / structured docs)
@@ -38,9 +39,37 @@ _SKIP_SECTIONS = {"references", "appendix"}
 
 # ─────────────────────────── Public entry point ───────────────────────────
 
+def create_chunker(cfg):
+    """Create a chunker instance once; reuse across samples to avoid reloading models."""
+    strategy = cfg.chunk_strategy
+    if strategy == "fixed":
+        return _FixedChunker(cfg.chunk_size, cfg.chunk_overlap)
+    elif strategy == "sentence":
+        return _SentenceChunker(cfg.chunk_min_chars, cfg.chunk_max_chars)
+    elif strategy == "semantic":
+        return _SemanticChunker(
+            cfg.embed_model,
+            cfg.embed_device,
+            cfg.semantic_threshold,
+            cfg.chunk_min_chars,
+            cfg.chunk_max_chars,
+        )
+    elif strategy == "section_then_semantic":
+        return _SectionSemanticChunker(
+            cfg.embed_model,
+            cfg.embed_device,
+            cfg.semantic_threshold,
+            cfg.chunk_min_chars,
+            cfg.chunk_max_chars,
+        )
+    else:
+        raise ValueError(f"Unknown chunk_strategy: {strategy!r}")
+
+
 def build_chunks(
     documents: list[dict],  # [{"id": str, "text": str}, ...]
     cfg,
+    chunker=None,
 ) -> list[dict]:
     """
     Returns a flat list of chunk dicts.  Each chunk has:
@@ -51,28 +80,8 @@ def build_chunks(
       section_text    full section text (for parent-chunk retrieval)
       text            the chunk text used for embedding & BM25
     """
-    strategy = cfg.chunk_strategy
-
-    if strategy == "fixed":
-        chunker = _FixedChunker(cfg.chunk_size, cfg.chunk_overlap)
-    elif strategy == "semantic":
-        chunker = _SemanticChunker(
-            cfg.embed_model,
-            cfg.embed_device,
-            cfg.semantic_threshold,
-            cfg.chunk_min_chars,
-            cfg.chunk_max_chars,
-        )
-    elif strategy == "section_then_semantic":
-        chunker = _SectionSemanticChunker(
-            cfg.embed_model,
-            cfg.embed_device,
-            cfg.semantic_threshold,
-            cfg.chunk_min_chars,
-            cfg.chunk_max_chars,
-        )
-    else:
-        raise ValueError(f"Unknown chunk_strategy: {strategy!r}")
+    if chunker is None:
+        chunker = create_chunker(cfg)
 
     all_chunks = []
     for doc in documents:
@@ -83,7 +92,7 @@ def build_chunks(
         "Built %d chunks from %d documents (strategy=%s)",
         len(all_chunks),
         len(documents),
-        strategy,
+        cfg.chunk_strategy,
     )
     return all_chunks
 
@@ -114,6 +123,46 @@ class _FixedChunker:
                 )
             )
         return chunks
+
+
+# ─────────────────────────── Sentence chunker ────────────────────────────
+
+class _SentenceChunker:
+    """Group sentences by size only — no embedding model needed."""
+
+    def __init__(self, min_chars: int, max_chars: int):
+        self.min_chars = min_chars
+        self.max_chars = max_chars
+
+    def chunk(self, text: str, doc_id: str) -> list[dict]:
+        sentences = _split_sentences_robust(text)
+        if not sentences:
+            return [_make_chunk(doc_id, text, "body", text, 0, text)]
+
+        groups: list[list[str]] = []
+        current: list[str] = []
+        current_len = 0
+
+        for sent in sentences:
+            sent_len = len(sent)
+            # Start a new group if adding this sentence would exceed max_chars
+            if current and current_len + sent_len + 1 > self.max_chars:
+                groups.append(current)
+                current, current_len = [], 0
+            current.append(sent)
+            current_len += sent_len + 1  # +1 for joining space
+
+        if current:
+            # Merge trailing short group into previous
+            if len(" ".join(current)) < self.min_chars and groups:
+                groups[-1].extend(current)
+            else:
+                groups.append(current)
+
+        return [
+            _make_chunk(doc_id, text, "body", text, i, " ".join(g))
+            for i, g in enumerate(groups)
+        ]
 
 
 # ─────────────────────────── Semantic chunker ─────────────────────────────
@@ -249,9 +298,52 @@ def _make_chunk(
     }
 
 
+# ── Sentence splitting ───────────────────────────────────────────────────
+
+# Abbreviations whose trailing dot is NOT a sentence boundary
+_ABBREV = re.compile(
+    r"(?:"
+    r"Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|approx|incl"
+    r"|Gen|Gov|Sgt|Cpl|Pvt|Col|Capt|Lt|Cmdr|Adm"
+    r"|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
+    r"|St|Ave|Blvd|Dept|Est|Fig|Eq|Vol|Rev|Ed"
+    r"|[A-Z]"                   # single-letter initials: U. S. A.
+    r")\Z"
+)
+
+
+def _split_sentences_robust(text: str) -> list[str]:
+    """Split text into sentences, handling abbreviations and decimals."""
+    # Split on .!? followed by whitespace, but keep the delimiter with the left part
+    raw = re.split(r"(?<=[.!?])\s+|\n{2,}", text)
+
+    # Re-join fragments that were incorrectly split at abbreviations / decimals
+    merged: list[str] = []
+    buf = ""
+    for frag in raw:
+        if buf:
+            buf = buf + " " + frag
+        else:
+            buf = frag
+        # Check if buf ends with an abbreviation dot or a decimal dot
+        # e.g. "Dr." or "3." (next fragment might start with a digit like "14")
+        stripped = buf.rstrip(".")
+        if buf.endswith(".") and (
+            _ABBREV.search(stripped)
+            or re.search(r"\d\Z", stripped)   # trailing digit before dot: "3."
+        ):
+            continue  # don't flush, keep accumulating
+        merged.append(buf.strip())
+        buf = ""
+    if buf:
+        merged.append(buf.strip())
+
+    return [s for s in merged if len(s) > 20]
+
+
 def _split_sentences(text: str) -> list[str]:
-    parts = re.split(r"(?<=[.!?])\s+|\n{2,}", text)
-    return [p.strip() for p in parts if len(p.strip()) > 20]
+    """Legacy wrapper used by semantic chunker."""
+    return _split_sentences_robust(text)
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:

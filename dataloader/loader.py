@@ -58,16 +58,16 @@ def _load_nq(split: str) -> list[EvalSample]:
     # Load answer spans from nq_open (question → list of answer strings)
     answer_map = _load_nq_answers(split)
 
-    doc_map = {row["_id"]: row["text"] for row in corpus_ds}
+    doc_map = {str(row["_id"]): row["text"] for row in corpus_ds}
 
     qrel_map: dict[str, list[str]] = {}
     for row in qrels_ds:
         if int(row.get("score", 1)) > 0:
-            qrel_map.setdefault(row["query-id"], []).append(row["corpus-id"])
+            qrel_map.setdefault(str(row["query-id"]), []).append(str(row["corpus-id"]))
 
     samples = []
     for row in queries_ds:
-        qid = row["_id"]
+        qid = str(row["_id"])
         if qid not in qrel_map:
             continue
         relevant_ids = qrel_map[qid]
@@ -137,16 +137,16 @@ def _load_scifact(split: str) -> list[EvalSample]:
     except Exception:
         qrels_ds = load_dataset("BeIR/scifact-qrels", split="test")
 
-    doc_map = {row["_id"]: row["text"] for row in corpus_ds}
+    doc_map = {str(row["_id"]): row["text"] for row in corpus_ds}
 
     qrel_map: dict[str, list[str]] = {}
     for row in qrels_ds:
         if int(row.get("score", 1)) > 0:
-            qrel_map.setdefault(row["query-id"], []).append(row["corpus-id"])
+            qrel_map.setdefault(str(row["query-id"]), []).append(str(row["corpus-id"]))
 
     samples = []
     for row in queries_ds:
-        qid = row["_id"]
+        qid = str(row["_id"])
         if qid not in qrel_map:
             continue
         relevant_ids = qrel_map[qid]

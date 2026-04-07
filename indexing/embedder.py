@@ -1,15 +1,12 @@
 """
-embedder.py — Encodes chunks to dense vectors with a disk cache.
+embedder.py — Encodes chunks to dense vectors with incremental disk cache.
 
-Cache key = (embed_model, chunk_id, text[:64])
-Avoids re-encoding the same corpus when only retrieval/reranker params change.
+Cache is a dict {chunk_id: vector} stored in vectors.pkl.
+Adding new chunks only encodes the missing ones.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import os
 import pickle
 from pathlib import Path
 
@@ -43,29 +40,46 @@ class Embedder:
     # ── Encoding ──────────────────────────────────────────────────────────
 
     def encode_passages(self, chunks: list[dict]) -> np.ndarray:
-        """Encode chunk texts. Returns (N, D) float32 array."""
-        cache_path = self._cache_path(chunks)
+        """Encode chunk texts with incremental caching. Returns (N, D) float32 array."""
+        if not chunks:
+            return np.empty((0, 0), dtype="float32")
+        cache_path = self.cache_dir / "vectors.pkl"
+
+        # Load existing cache: {chunk_id: vector}
+        vec_cache: dict[str, np.ndarray] = {}
         if cache_path.exists():
-            logger.debug("Embedding cache hit: %s", cache_path.name)
             with open(cache_path, "rb") as f:
-                return pickle.load(f)
+                vec_cache = pickle.load(f)
+            logger.info("Embedding cache loaded: %d vectors", len(vec_cache))
 
-        texts = [self._passage_text(c["text"]) for c in chunks]
-        logger.info(
-            "Encoding %d passages with '%s' ...", len(texts), self.model_name
-        )
-        vecs = self.model.encode(
-            texts,
-            batch_size=self.batch_size,
-            show_progress_bar=True,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        ).astype("float32")
+        # Find chunks that need encoding
+        missing = [c for c in chunks if c["chunk_id"] not in vec_cache]
 
-        with open(cache_path, "wb") as f:
-            pickle.dump(vecs, f)
-        logger.info("Saved embedding cache to %s", cache_path.name)
-        return vecs
+        if missing:
+            texts = [self._passage_text(c["text"]) for c in missing]
+            logger.info(
+                "Encoding %d new passages (%d cached) with '%s' ...",
+                len(missing), len(chunks) - len(missing), self.model_name,
+            )
+            new_vecs = self.model.encode(
+                texts,
+                batch_size=self.batch_size,
+                show_progress_bar=True,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            ).astype("float32")
+
+            for c, v in zip(missing, new_vecs):
+                vec_cache[c["chunk_id"]] = v
+
+            with open(cache_path, "wb") as f:
+                pickle.dump(vec_cache, f)
+            logger.info("Saved embedding cache: %d vectors", len(vec_cache))
+        else:
+            logger.info("All %d embeddings from cache.", len(chunks))
+
+        # Return vectors in the same order as input chunks
+        return np.stack([vec_cache[c["chunk_id"]] for c in chunks])
 
     def encode_query(self, query: str) -> np.ndarray:
         """Encode a single query string. Returns (D,) float32 array."""
@@ -119,8 +133,3 @@ class Embedder:
             return _E5_PASSAGE_PREFIX + text
         return text
 
-    def _cache_path(self, chunks: list[dict]) -> Path:
-        """Deterministic cache key based on chunk content (model is in dir path)."""
-        key_parts = [c["chunk_id"] + c["text"][:64] for c in chunks]
-        digest = hashlib.md5("".join(key_parts).encode()).hexdigest()[:12]
-        return self.cache_dir / f"vectors_{digest}.pkl"

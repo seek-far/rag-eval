@@ -19,12 +19,29 @@ def _list_int(key: str, default: str) -> list[int]:
     return [int(x) for x in os.getenv(key, default).split(",")]
 
 
+def _parse_sample_batches() -> list[tuple[int, int]]:
+    """Parse DATASET_SAMPLE, DATASET_SAMPLE_2, ... into [(start, end), ...]."""
+    base = int(os.getenv("DATASET_SAMPLE", "200"))
+    batches = [(0, base)]
+    i = 2
+    while True:
+        val = os.getenv(f"DATASET_SAMPLE_{i}")
+        if val is None:
+            break
+        size = int(val)
+        prev_end = batches[-1][1]
+        batches.append((prev_end, prev_end + size))
+        i += 1
+    return batches
+
+
 @dataclass
 class Config:
     # ── Dataset ──────────────────────────────────────────────────────────────
     dataset: str = os.getenv("DATASET", "nq")
     split: str = os.getenv("DATASET_SPLIT", "test")
     sample: int = int(os.getenv("DATASET_SAMPLE", "200"))
+    sample_batches: list = field(default_factory=_parse_sample_batches)
 
     # ── Chunking ─────────────────────────────────────────────────────────────
     chunk_strategy: str = os.getenv("CHUNK_STRATEGY", "semantic")
@@ -76,11 +93,12 @@ class Config:
             self.k_values = _list_int("EVAL_K_VALUES", "1,3,5,10")
 
     @property
-    def chunk_cache_dir(self) -> Path:
-        """Cache dir for chunking results, determined by dataset + chunk params."""
-        dataset_part = f"{self.dataset}_{self.split}_n{self.sample}"
+    def _chunk_params_tag(self) -> str:
+        """Hash tag encoding chunk strategy + parameters."""
         if self.chunk_strategy == "fixed":
             params = f"sz{self.chunk_size}_ov{self.chunk_overlap}"
+        elif self.chunk_strategy == "sentence":
+            params = f"min{self.chunk_min_chars}_max{self.chunk_max_chars}"
         else:
             # semantic / section_then_semantic — includes embed_model
             # because semantic chunking uses it for sentence similarity
@@ -91,20 +109,30 @@ class Config:
             )
         tag = f"{self.chunk_strategy}_{params}"
         digest = hashlib.md5(tag.encode()).hexdigest()[:8]
-        return Path(self.cache_dir) / "chunks" / dataset_part / f"{self.chunk_strategy}_{digest}"
+        return f"{self.chunk_strategy}_{digest}"
+
+    @property
+    def chunk_cache_dir(self) -> Path:
+        """Cache dir for chunking results. Batch files live inside."""
+        dataset_part = f"{self.dataset}_{self.split}"
+        return Path(self.cache_dir) / "chunks" / dataset_part / self._chunk_params_tag
 
     @property
     def embed_cache_dir(self) -> Path:
-        """Cache dir for embedding vectors, nested under the chunk cache."""
+        """Cache dir for embedding vectors (chunk_id → vector dict)."""
+        dataset_part = f"{self.dataset}_{self.split}"
         model_safe = self.embed_model.replace("/", "_")
-        return Path(self.cache_dir) / "embeddings" / self.chunk_cache_dir.relative_to(
-            Path(self.cache_dir) / "chunks"
-        ) / model_safe
+        return Path(self.cache_dir) / "embeddings" / dataset_part / self._chunk_params_tag / model_safe
+
+    @property
+    def total_samples(self) -> int:
+        return self.sample_batches[-1][1]
 
     def summary(self) -> str:
+        batch_desc = " + ".join(f"{e-s}" for s, e in self.sample_batches)
         return (
             f"  dataset        : {self.dataset} / {self.split} "
-            f"(sample={self.sample or 'all'})\n"
+            f"(samples={batch_desc}, total={self.total_samples})\n"
             f"  chunk_strategy : {self.chunk_strategy} "
             f"(size={self.chunk_size}, overlap={self.chunk_overlap}, "
             f"threshold={self.semantic_threshold})\n"

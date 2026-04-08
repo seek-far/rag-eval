@@ -6,10 +6,15 @@ rest of the pipeline doesn't need to know which dataset it's running on.
 """
 from __future__ import annotations
 import logging
+import os
+import pickle
+from pathlib import Path
 from datasets import load_dataset
 from .schema import EvalSample
 
 logger = logging.getLogger(__name__)
+
+_CACHE_DIR = Path(os.getenv("CACHE_DIR", "./cache")) / "samples"
 
 
 def load_eval_samples(
@@ -32,9 +37,26 @@ def load_eval_samples(
             f"Unknown dataset '{dataset}'. "
             f"Choose from: {list(loaders)}"
         )
+
+    # Check local sample cache first
+    cache_path = _CACHE_DIR / f"{dataset}_{split}.pkl"
+    if cache_path.exists():
+        logger.info("Sample cache hit: %s", cache_path)
+        with open(cache_path, "rb") as f:
+            samples = pickle.load(f)
+        logger.info("Loaded %d samples from cache.", len(samples))
+        return samples[:n] if n > 0 else samples
+
     logger.info("Loading dataset '%s' / split='%s' ...", dataset, split)
     samples = loaders[dataset](split)
     logger.info("Loaded %d samples.", len(samples))
+
+    # Save to cache
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "wb") as f:
+        pickle.dump(samples, f)
+    logger.info("Saved sample cache: %s (%d samples)", cache_path, len(samples))
+
     return samples[:n] if n > 0 else samples
 
 

@@ -18,3 +18,5 @@ bert-score>=0.3.13         # optional — BERTScore answer metric
 python-dotenv>=1.0.0
 tqdm>=4.66.0
 numpy>=1.26.0
+
+python-dotenv

@@ -17,3 +17,5 @@ cache-copy/
 {datasets,indexing,retrieval,reranking,eval,results,cache}/
 .*/
 *.log
+*.zip
+*.jsonl

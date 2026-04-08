@@ -11,6 +11,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +23,23 @@ def aggregate(per_sample: list[dict[str, float]]) -> dict[str, float]:
     return {k: round(mean(r.get(k, 0.0) for r in per_sample), 4) for k in keys}
 
 
-def save_run(cfg, per_sample: list[dict], agg: dict[str, float]) -> None:
+def save_run(
+    cfg,
+    per_sample: list[dict],
+    agg: dict[str, float],
+    artifacts: dict[str, Any] | None = None,
+) -> dict:
     Path(cfg.results_dir).mkdir(parents=True, exist_ok=True)
     jsonl_path = Path(cfg.results_dir) / "results.jsonl"
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    artifact_rel = None
+
+    if artifacts:
+        artifact_rel = _save_artifacts(cfg, timestamp, artifacts)
 
     row = {
         "run_name": cfg.run_name,
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "timestamp": timestamp,
         "config": {
             "dataset": cfg.dataset,
             "split": cfg.split,
@@ -50,12 +61,71 @@ def save_run(cfg, per_sample: list[dict], agg: dict[str, float]) -> None:
         "n_samples": len(per_sample),
         "metrics": agg,
     }
+    if artifact_rel is not None:
+        row["artifacts_dir"] = artifact_rel
 
     with open(jsonl_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     logger.info("Results saved → %s", jsonl_path)
     _print_table(jsonl_path)
+    return row
+
+
+def _save_artifacts(cfg, timestamp: str, artifacts: dict[str, Any]) -> str:
+    run_label = _safe_name(f"{timestamp}_{cfg.run_name}")
+    artifact_dir = Path(cfg.results_dir) / "artifacts" / run_label
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest = {
+        "run_name": cfg.run_name,
+        "timestamp": timestamp,
+        "dataset": cfg.dataset,
+        "split": cfg.split,
+        "sample_batches": list(cfg.sample_batches),
+        "chunk_cache_dir": str(cfg.chunk_cache_dir),
+        "embed_cache_dir": str(cfg.embed_cache_dir),
+        "files": [],
+    }
+
+    file_map = {
+        "summary.json": artifacts.get("summary"),
+        "corpus_summary.json": artifacts.get("corpus_summary"),
+        "config_snapshot.json": artifacts.get("config_snapshot"),
+        "sample_inputs.jsonl": artifacts.get("sample_inputs"),
+        "per_sample_results.jsonl": artifacts.get("per_sample_results"),
+        "retrieval_traces.jsonl": artifacts.get("retrieval_traces"),
+        "corpus_chunks.jsonl": artifacts.get("corpus_chunks"),
+    }
+
+    for filename, payload in file_map.items():
+        if payload is None:
+            continue
+        target = artifact_dir / filename
+        if filename.endswith(".jsonl"):
+            _write_jsonl(target, payload)
+        else:
+            _write_json(target, payload)
+        manifest["files"].append(filename)
+
+    _write_json(artifact_dir / "manifest.json", manifest)
+    logger.info("Run artifacts saved -> %s", artifact_dir)
+    return str(Path("artifacts") / run_label)
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _safe_name(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in value)
 
 
 def _print_table(jsonl_path: Path) -> None:

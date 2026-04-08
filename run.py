@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import pickle
 import sys
+from pathlib import Path
 from tqdm import tqdm
 
 from config import Config
@@ -18,7 +19,7 @@ from dataloader.loader import load_eval_samples
 from indexing.chunker import build_chunks, create_chunker
 from indexing.embedder import Embedder
 from indexing.bm25_index import BM25Index
-from retrieval.hybrid import HybridRetriever
+from retrieval.hybrid import HybridRetriever, _rrf
 from reranking.cross_encoder import Reranker
 from eval.retrieval_metrics import compute_retrieval_metrics, compute_context_metrics
 from eval.answer_metrics import compute_answer_metrics
@@ -30,6 +31,125 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("run")
+
+
+def _snapshot_chunk(chunk: dict, *, rank: int | None = None, relevant_doc_ids=None) -> dict:
+    relevant_set = set(relevant_doc_ids or [])
+    row = {
+        "chunk_id": chunk["chunk_id"],
+        "doc_id": chunk["doc_id"],
+        "section_type": chunk.get("section_type", ""),
+        "text": chunk["text"],
+        "doc_text": chunk.get("doc_text", ""),
+        "section_text": chunk.get("section_text", ""),
+        "retrieval_score": float(chunk["retrieval_score"]) if "retrieval_score" in chunk else None,
+        "rerank_score": float(chunk["rerank_score"]) if "rerank_score" in chunk else None,
+        "is_relevant_doc": chunk["doc_id"] in relevant_set,
+    }
+    if rank is not None:
+        row["rank"] = rank
+    return row
+
+
+def _sample_input_row(sample) -> dict:
+    return {
+        "sample_id": sample.id,
+        "query": sample.query,
+        "documents": sample.documents,
+        "document_count": len(sample.documents),
+        "relevant_doc_ids": sample.relevant_doc_ids,
+        "reference_answer": sample.reference_answer,
+        "answer_spans": sample.answer_spans,
+        "choices": sample.choices,
+        "correct_choice": sample.correct_choice,
+    }
+
+
+def _stage_trace(
+    ranked: list[tuple[str, float]],
+    chunk_map: dict[str, dict],
+    limit: int,
+) -> list[dict]:
+    rows = []
+    for rank, (chunk_id, score) in enumerate(ranked[:limit], start=1):
+        if chunk_id not in chunk_map:
+            continue
+        chunk = chunk_map[chunk_id]
+        rows.append(
+            {
+                "rank": rank,
+                "chunk_id": chunk_id,
+                "doc_id": chunk["doc_id"],
+                "score": float(score),
+                "section_type": chunk.get("section_type", ""),
+                "text": chunk["text"],
+            }
+        )
+    return rows
+
+
+def _build_retrieval_trace(retriever, query: str, chunk_map: dict[str, dict]) -> tuple[list[dict], dict]:
+    dense_results: list[tuple[str, float]] = []
+    sparse_results: list[tuple[str, float]] = []
+    if retriever.mode == "dense":
+        fused_results = retriever._dense(query)
+        dense_results = fused_results
+    elif retriever.mode == "sparse":
+        fused_results = retriever._sparse(query)
+        sparse_results = fused_results
+    else:
+        dense_results = retriever._dense(query)
+        sparse_results = retriever._sparse(query)
+        fused_results = _rrf(
+            dense_results,
+            sparse_results,
+            k=retriever.rrf_k,
+            w_dense=retriever.dense_w,
+            w_sparse=retriever.sparse_w,
+        )
+
+    candidates = []
+    for chunk_id, score in fused_results[: retriever.k]:
+        if chunk_id not in chunk_map:
+            continue
+        chunk = dict(chunk_map[chunk_id])
+        chunk["retrieval_score"] = float(score)
+        candidates.append(chunk)
+
+    trace = {
+        "mode": retriever.mode,
+        "dense": _stage_trace(dense_results, chunk_map, retriever.k),
+        "sparse": _stage_trace(sparse_results, chunk_map, retriever.k),
+        "fused": _stage_trace(fused_results, chunk_map, retriever.k),
+    }
+    return candidates, trace
+
+
+def _corpus_summary(samples, unique_chunks: list[dict], cfg) -> dict:
+    unique_doc_ids = sorted({doc["id"] for sample in samples for doc in sample.documents})
+    section_counts: dict[str, int] = {}
+    chunk_lengths: list[int] = []
+    for chunk in unique_chunks:
+        section = chunk.get("section_type", "body")
+        section_counts[section] = section_counts.get(section, 0) + 1
+        chunk_lengths.append(len(chunk["text"]))
+
+    chunk_cache_files = sorted(str(p) for p in Path(cfg.chunk_cache_dir).glob("*.pkl"))
+    embed_cache_files = sorted(str(p) for p in Path(cfg.embed_cache_dir).glob("*"))
+    return {
+        "sample_count": len(samples),
+        "unique_document_count": len(unique_doc_ids),
+        "unique_chunk_count": len(unique_chunks),
+        "section_counts": section_counts,
+        "avg_chunk_chars": (sum(chunk_lengths) / len(chunk_lengths)) if chunk_lengths else 0.0,
+        "max_chunk_chars": max(chunk_lengths) if chunk_lengths else 0,
+        "min_chunk_chars": min(chunk_lengths) if chunk_lengths else 0,
+        "chunk_cache_dir": str(cfg.chunk_cache_dir),
+        "chunk_cache_files": chunk_cache_files,
+        "embed_cache_dir": str(cfg.embed_cache_dir),
+        "embed_cache_files": embed_cache_files,
+        "sample_batches": list(cfg.sample_batches),
+    }
 
 
 def main() -> None:
@@ -101,10 +221,16 @@ def main() -> None:
 
     # ── 4. Evaluate ───────────────────────────────────────────────────────
     per_sample_results: list[dict] = []
+    sample_inputs: list[dict] = [_sample_input_row(sample) for sample in samples]
+    retrieval_traces: list[dict] = []
 
     for sample in tqdm(samples, desc="Evaluating", unit="query"):
         # Retrieve
-        candidates = retriever.retrieve(sample.query, chunk_map)
+        candidates, retrieval_trace = _build_retrieval_trace(retriever, sample.query, chunk_map)
+        retrieved_pre_rerank = [
+            _snapshot_chunk(c, rank=rank, relevant_doc_ids=sample.relevant_doc_ids)
+            for rank, c in enumerate(candidates, start=1)
+        ]
 
         # Rerank
         if reranker is not None:
@@ -120,6 +246,7 @@ def main() -> None:
                 retrieved_ids.append(c["doc_id"])
 
         result: dict[str, float] = {}
+        predicted = ""
 
         # Retrieval metrics (need relevant_doc_ids)
         if sample.relevant_doc_ids:
@@ -151,12 +278,98 @@ def main() -> None:
                 )
             )
 
-        per_sample_results.append(result)
+        final_candidates = [
+            _snapshot_chunk(c, rank=rank, relevant_doc_ids=sample.relevant_doc_ids)
+            for rank, c in enumerate(candidates, start=1)
+        ]
+        sample_result = {
+            "sample_id": sample.id,
+            "query": sample.query,
+            "document_count": len(sample.documents),
+            "relevant_doc_ids": sample.relevant_doc_ids,
+            "retrieved_doc_ids": retrieved_ids,
+            "predicted_answer": predicted,
+            "reference_answer": sample.reference_answer,
+            "answer_spans": sample.answer_spans,
+            "metrics": result,
+            "pre_rerank_candidates": retrieved_pre_rerank,
+            "final_candidates": final_candidates,
+        }
+        per_sample_results.append(sample_result)
+        retrieval_traces.append(
+            {
+                "sample_id": sample.id,
+                "query": sample.query,
+                "retrieval_mode": cfg.retrieval_mode,
+                "retrieval_trace": retrieval_trace,
+                "pre_rerank_candidates": retrieved_pre_rerank,
+                "final_candidates": final_candidates,
+                "retrieved_doc_ids": retrieved_ids,
+            }
+        )
 
     # ── 5. Aggregate and save ─────────────────────────────────────────────
-    agg = aggregate(per_sample_results)
+    metric_rows = [row["metrics"] for row in per_sample_results]
+    agg = aggregate(metric_rows)
     logger.info("Aggregated metrics: %s", agg)
-    save_run(cfg, per_sample_results, agg)
+    corpus_rows = [
+        {
+            "chunk_id": chunk["chunk_id"],
+            "doc_id": chunk["doc_id"],
+            "section_type": chunk.get("section_type", ""),
+            "text": chunk["text"],
+            "doc_text": chunk.get("doc_text", ""),
+            "section_text": chunk.get("section_text", ""),
+        }
+        for chunk in unique_chunks
+    ]
+    artifacts = {
+        "summary": {
+            "run_name": cfg.run_name,
+            "dataset": cfg.dataset,
+            "split": cfg.split,
+            "n_samples": len(samples),
+            "n_unique_chunks": len(unique_chunks),
+            "metrics": agg,
+        },
+        "config_snapshot": {
+            "dataset": cfg.dataset,
+            "split": cfg.split,
+            "sample": cfg.sample,
+            "sample_batches": list(cfg.sample_batches),
+            "chunk_strategy": cfg.chunk_strategy,
+            "chunk_size": cfg.chunk_size,
+            "chunk_overlap": cfg.chunk_overlap,
+            "semantic_threshold": cfg.semantic_threshold,
+            "chunk_min_chars": cfg.chunk_min_chars,
+            "chunk_max_chars": cfg.chunk_max_chars,
+            "embed_model": cfg.embed_model,
+            "embed_device": cfg.embed_device,
+            "embed_devices": cfg.embed_devices,
+            "embed_batch": cfg.embed_batch,
+            "embed_batch_is_auto": cfg.embed_batch_is_auto,
+            "retrieve_k": cfg.retrieve_k,
+            "retrieval_mode": cfg.retrieval_mode,
+            "rrf_k": cfg.rrf_k,
+            "dense_weight": cfg.dense_weight,
+            "sparse_weight": cfg.sparse_weight,
+            "reranker": cfg.reranker,
+            "reranker_model": cfg.reranker_model,
+            "rerank_top_k": cfg.rerank_top_k,
+            "metrics": cfg.metrics,
+            "k_values": cfg.k_values,
+            "results_dir": cfg.results_dir,
+            "cache_dir": cfg.cache_dir,
+            "chunk_cache_dir": str(cfg.chunk_cache_dir),
+            "embed_cache_dir": str(cfg.embed_cache_dir),
+        },
+        "corpus_summary": _corpus_summary(samples, unique_chunks, cfg),
+        "sample_inputs": sample_inputs,
+        "per_sample_results": per_sample_results,
+        "retrieval_traces": retrieval_traces,
+        "corpus_chunks": corpus_rows,
+    }
+    save_run(cfg, metric_rows, agg, artifacts=artifacts)
 
 
 if __name__ == "__main__":

@@ -206,6 +206,34 @@ python compare_runs.py --csv > results/comparison.csv
 
 ---
 
+## Saved Artifacts
+
+Each run still appends one summary row to `results/results.jsonl`, but now it
+also saves a per-run artifact directory under:
+
+```text
+results/artifacts/<timestamp>_<run_name>/
+```
+
+The `results.jsonl` row includes an `artifacts_dir` field pointing to that
+directory.
+
+Typical files in each artifact directory:
+
+- `manifest.json` - index of files plus cache paths used by the run
+- `summary.json` - run-level summary (dataset, sample count, metrics, chunk count)
+- `config_snapshot.json` - config used for the run
+- `corpus_summary.json` - corpus/chunk statistics and cache file references
+- `sample_inputs.jsonl` - per-sample inputs (`query`, `documents`, labels, answers)
+- `per_sample_results.jsonl` - per-sample metrics, predicted answer, and final candidates
+- `retrieval_traces.jsonl` - dense/sparse/fused retrieval traces plus rerank inputs/outputs
+- `corpus_chunks.jsonl` - all unique chunks used in the run
+
+The existing chunking and embedding caches are unchanged and still live under
+`cache/chunks/...` and `cache/embeddings/...`.
+
+---
+
 ## Project structure
 
 ```

@@ -19,3 +19,12 @@ cache-copy/
 *.log
 *.zip
 *.jsonl
+venv-win/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/

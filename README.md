@@ -41,6 +41,16 @@ python compare_runs.py
 
 ---
 
+## Requirements
+
+- Python `3.10+`
+- Enough disk space for downloaded datasets, embedding caches, and run artifacts
+- Optional GPU for faster embedding / reranking (`cuda` or `mps`)
+
+If you are publishing or sharing the repo, keep `.env` private and commit only `.env.example`.
+
+---
+
 ## Supported datasets
 
 | Key | Dataset | Answer labels | Notes |
@@ -87,6 +97,10 @@ All datasets are downloaded automatically on first run via HuggingFace `datasets
 |----------|---------|--------------------------|
 | `EMBED_MODEL` | `BAAI/bge-large-en-v1.5` | See table below |
 | `EMBED_BATCH_SIZE` | `64` | Reduce if OOM |
+| `EMBED_DEVICES` | unset | Comma-separated GPUs for multi-device encoding |
+| `EMBED_BATCH_MIN` | `8` | Lower bound for auto batch probing |
+| `EMBED_BATCH_MAX` | `512` | Upper bound for auto batch probing |
+| `EMBED_BATCH_UTILIZATION` | `0.85` | Target GPU memory utilisation when auto-tuning |
 | `EMBED_DEVICE` | `cpu` | `cpu` · `cuda` · `mps` |
 
 **Model comparison:**
@@ -99,6 +113,17 @@ All datasets are downloaded automatically on first run via HuggingFace `datasets
 | `BAAI/bge-m3` | 570M | Slow | Strong | Yes |
 
 BGE and E5 models automatically apply the correct query/passage prefixes.
+
+**Multi-GPU encoding:**
+- You can distribute embedding and semantic-chunking work across multiple GPUs with `EMBED_DEVICES`.
+- Example: `EMBED_DEVICES=cuda:0,cuda:1 python run.py`
+- If `EMBED_DEVICES` is set, the project will use those devices for encoding work instead of a single `EMBED_DEVICE`.
+
+**Auto batch-size probing:**
+- Set `EMBED_BATCH_SIZE=auto` to let the project probe a safe batch size automatically.
+- Tuning is bounded by `EMBED_BATCH_MIN` and `EMBED_BATCH_MAX`.
+- `EMBED_BATCH_UTILIZATION` controls how aggressively the probed batch size targets available GPU memory.
+- Example: `EMBED_DEVICE=cuda EMBED_BATCH_SIZE=auto python run.py`
 
 ### Retrieval
 
@@ -117,7 +142,7 @@ acronyms, numbers) — BM25 handles exact matches that dense embeddings can miss
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `RERANKER` | `cross-encoder` | `none` · `cross-encoder` |
+| `RERANKER` | `cross-encoder` | `none` · `cross-encoder` · `rule-top3` |
 | `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | See options below |
 | `RERANK_TOP_K` | `5` | Chunks kept after reranking |
 
@@ -204,6 +229,20 @@ python compare_runs.py --last 5
 python compare_runs.py --csv > results/comparison.csv
 ```
 
+Example write-up:
+- [Natural Questions ablation summary (400 samples)](docs/nq_400_ablation_summary.md)
+- [SciFact ablation summary (400 samples)](docs/scifact_400_ablation_summary.md)
+
+---
+
+## Utility scripts
+
+These helper scripts are useful when inspecting runs beyond the aggregate table:
+
+- `python utils/browse_data.py` - inspect dataset samples and fields
+- `python utils/trace_query.py` - inspect retrieval / rerank traces for a query
+- `python utils/case_analysis.py` - review per-sample successes and failures
+
 ---
 
 ## Saved Artifacts
@@ -238,38 +277,55 @@ The existing chunking and embedding caches are unchanged and still live under
 
 ```
 rag-eval/
-├── .env.example             ← copy to .env and configure
-├── config.py                ← reads all env vars, single source of truth
-├── run.py                   ← main entry point
-├── run_experiments.sh       ← ablation suite (5 standard experiments)
-├── compare_runs.py          ← cross-run comparison table
-├── requirements.txt
-│
-├── datasets/
-│   ├── schema.py            ← EvalSample dataclass
-│   └── loader.py            ← NQ / SciFact / QASPER / QuALITY loaders
-│
-├── indexing/
-│   ├── chunker.py           ← fixed / semantic / section_then_semantic
-│   ├── embedder.py          ← SentenceTransformer + FAISS + disk cache
-│   └── bm25_index.py        ← BM25Okapi sparse index
-│
-├── retrieval/
-│   └── hybrid.py            ← dense · sparse · hybrid (RRF)
-│
-├── reranking/
-│   └── cross_encoder.py     ← CrossEncoder reranker
-│
-├── eval/
-│   ├── retrieval_metrics.py ← MRR / NDCG / Hit / Recall
-│   ├── answer_metrics.py    ← token F1 / BERTScore
-│   └── reporter.py          ← saves results.jsonl + prints table
-│
-├── results/                 ← created at runtime
-│   └── results.jsonl        ← one JSON line per run
-└── cache/                   ← created at runtime
-    └── embeddings/          ← cached embedding vectors
+.env.example                -> copy to .env and configure
+config.py                   -> reads all env vars, single source of truth
+run.py                      -> main entry point
+run_experiments.sh          -> standard ablation suite
+compare_runs.py             -> cross-run comparison table
+requirements.txt
+dataloader/
+  schema.py                 -> EvalSample dataclass
+  loader.py                 -> NQ / SciFact / QASPER / QuALITY loaders
+indexing/
+  chunker.py                -> fixed / semantic / section_then_semantic
+  embedder.py               -> SentenceTransformer + FAISS + disk cache
+  bm25_index.py             -> BM25Okapi sparse index
+  encoder_runtime.py        -> device/runtime helpers for encoding
+retrieval/
+  hybrid.py                 -> dense / sparse / hybrid (RRF)
+reranking/
+  cross_encoder.py          -> cross-encoder and rule-based rerankers
+eval/
+  retrieval_metrics.py      -> MRR / NDCG / Hit / Recall
+  answer_metrics.py         -> token F1 / BERTScore
+  reporter.py               -> saves results.jsonl + prints tables
+utils/
+  browse_data.py            -> inspect dataset contents
+  trace_query.py            -> inspect retrieval traces
+  case_analysis.py          -> review qualitative examples
+docs/
+  *_summary.md              -> shareable experiment write-ups
+  figures/                  -> generated figures used in docs
+results/                    -> created at runtime; ignored by git
+cache/                      -> created at runtime; ignored by git
 ```
+
+---
+
+## Publishing checklist
+
+Before pushing the repository publicly:
+
+- keep `.env` out of git
+- verify model and dataset credentials are not hard-coded anywhere
+- avoid committing `results/`, `cache/`, local virtualenvs, or packaging scratch folders
+- regenerate figures from the tracked scripts in `docs/` if needed
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
 
 ---
 

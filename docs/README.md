@@ -5,7 +5,7 @@ This folder contains the shareable experiment summaries and the small scripts us
 ## Experiment summaries
 
 - [Natural Questions ablation summary (400 samples)](nq_400_ablation_summary.md)
-- [SciFact ablation summary (400 samples)](scifact_400_ablation_summary.md)
+- [SciFact ablation summary (300 samples)](scifact_300_ablation_summary.md)
 
 ## Regenerating figures
 

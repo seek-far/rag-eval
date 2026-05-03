@@ -1,6 +1,6 @@
-# SciFact Ablation Summary (400 samples)
+# SciFact Ablation Summary (300 samples)
 
-This ablation compares retrieval and reranking choices on a 400-sample subset of the SciFact test set.
+This ablation compares retrieval and reranking choices on the loaded SciFact test set. Although the run config banner may show `200 + 200`, BEIR/SciFact test provides 300 qrel-backed samples in this project, so the completed SciFact runs report `n_samples = 300`.
 
 **Shared setup**
 - Embedding model: `BAAI/bge-large-en-v1.5`
@@ -8,7 +8,7 @@ This ablation compares retrieval and reranking choices on a 400-sample subset of
 - Compared retrieval modes: `hybrid` and `dense`
 - Compared rerankers: `none`, `cross-encoder/ms-marco-MiniLM-L-6-v2`, and `BAAI/bge-reranker-large`
 
-![SciFact ablation figure](figures/scifact_400_ablation.png)
+![SciFact ablation figure](figures/scifact_300_ablation.png)
 
 ## Headline
 
@@ -56,6 +56,6 @@ If you want to keep exploring reranking on SciFact, the most informative next co
 
 ## Caveats
 
-- These conclusions are based on the provided `400`-sample SciFact slice.
+- These conclusions are based on the loaded `300`-sample SciFact test set used by the completed local runs.
 - Not every row varies just one factor, so this is a practical ablation rather than a perfectly controlled study.
 - The best SciFact run here is `dense`, while the NQ best run was `hybrid + cross-encoder`; that contrast is a useful reminder that retrieval defaults may need to be dataset-specific.

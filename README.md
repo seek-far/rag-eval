@@ -231,7 +231,7 @@ python compare_runs.py --csv > results/comparison.csv
 
 Example write-up:
 - [Natural Questions ablation summary (400 samples)](docs/nq_400_ablation_summary.md)
-- [SciFact ablation summary (400 samples)](docs/scifact_400_ablation_summary.md)
+- [SciFact ablation summary (300 samples)](docs/scifact_300_ablation_summary.md)
 
 ---
 

@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 DOCS_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = DOCS_DIR / "figures"
-OUTPUT_PATH = OUTPUT_DIR / "scifact_400_ablation.png"
+OUTPUT_PATH = OUTPUT_DIR / "scifact_300_ablation.png"
 
 ROWS = [
     {
@@ -53,7 +53,7 @@ COLORS = {
 def build_plot() -> None:
     plt.style.use("seaborn-v0_8-whitegrid")
     fig, axes = plt.subplots(1, 2, figsize=(13, 6.2), constrained_layout=True)
-    fig.suptitle("SciFact Ablation (400 samples)", fontsize=16, fontweight="bold")
+    fig.suptitle("SciFact Ablation (300 samples)", fontsize=16, fontweight="bold")
 
     labels = [row["label"] for row in ROWS]
     colors = [COLORS[row["group"]] for row in ROWS]

@@ -142,9 +142,16 @@ acronyms, numbers) — BM25 handles exact matches that dense embeddings can miss
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `RERANKER` | `cross-encoder` | `none` · `cross-encoder` · `rule-top3` |
+| `RERANKER` | `cross-encoder` | `none` · `cross-encoder` · `rule-top3` · `llm-cross-encoder` |
 | `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | See options below |
 | `RERANK_TOP_K` | `5` | Chunks kept after reranking |
+| `LLM_BASE_URL` | unset | OpenAI-compatible base URL for `llm-cross-encoder`, usually including `/v1` |
+| `LLM_API_KEY` | unset | API key for the LLM reranker; leave blank if your local server does not require one |
+| `LLM_MODEL` | unset | Model name sent to the OpenAI-compatible chat completions endpoint |
+| `LLM_TEMPERATURE` | `0` | Low temperature is recommended for stable reranking |
+| `LLM_MAX_TOKENS` | `4096` | Maximum response tokens for the JSON score payload |
+| `LLM_TIMEOUT` | `60` | Request timeout in seconds |
+| `LLM_RERANK_MAX_CHARS` | `1500` | Per-candidate passage truncation before sending to the LLM; `0` disables truncation |
 
 **Reranker model options:**
 
@@ -152,6 +159,13 @@ acronyms, numbers) — BM25 handles exact matches that dense embeddings can miss
 |-------|-------|---------|-------|
 | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Fast | Good | Default |
 | `BAAI/bge-reranker-large` | Slow | Stronger | Better for academic text |
+
+**OpenAI-compatible LLM reranking:**
+
+Set `RERANKER=llm-cross-encoder` to score each retrieved candidate with a
+chat-completions compatible model. The reranker sends the query and retrieved
+candidate chunks to `LLM_BASE_URL/chat/completions`, expects a JSON score list,
+adds `rerank_score` to each chunk, and sorts candidates by that score.
 
 ### Evaluation metrics
 

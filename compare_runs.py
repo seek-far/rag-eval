@@ -34,6 +34,7 @@ def load_rows(results_dir: str) -> list[dict]:
 
 def flatten(row: dict) -> dict:
     c = row.get("config", {})
+    rerank_model = c.get("llm_model") or c.get("reranker_model", "")
     flat = {
         "run_name":       row.get("run_name", ""),
         "timestamp":      row.get("timestamp", ""),
@@ -51,7 +52,7 @@ def flatten(row: dict) -> dict:
         "dense_w":        c.get("dense_weight", ""),
         "sparse_w":       c.get("sparse_weight", ""),
         "reranker":       c.get("reranker", ""),
-        "rerank_model":   c.get("reranker_model", "").split("/")[-1],
+        "rerank_model":   str(rerank_model).split("/")[-1],
         "rerank_top_k":   c.get("rerank_top_k", ""),
     }
     for k, v in row.get("metrics", {}).items():

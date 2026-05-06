@@ -57,6 +57,8 @@ def save_run(
             "reranker": cfg.reranker,
             "reranker_model": cfg.reranker_model,
             "rerank_top_k": cfg.rerank_top_k,
+            "llm_base_url": cfg.llm_base_url,
+            "llm_model": cfg.llm_model,
         },
         "n_samples": len(per_sample),
         "metrics": agg,
@@ -156,6 +158,7 @@ def _print_table(jsonl_path: Path) -> None:
     widths = {h: max(len(h), 6) for h in header}
     for r in rows:
         c = r["config"]
+        rerank_model = c.get("llm_model") or c.get("reranker_model", "")
         vals = {
             "run_name": r.get("run_name", ""),
             "dataset": c.get("dataset", ""),
@@ -163,7 +166,7 @@ def _print_table(jsonl_path: Path) -> None:
             "embed_model": c.get("embed_model", "").split("/")[-1],
             "retrieval_mode": c.get("retrieval_mode", ""),
             "reranker": c.get("reranker", ""),
-            "reranker_model": c.get("reranker_model", "").split("/")[-1],
+            "reranker_model": str(rerank_model).split("/")[-1],
         }
         for h in cfg_cols:
             widths[h] = max(widths[h], len(str(vals.get(h, ""))))
@@ -181,6 +184,7 @@ def _print_table(jsonl_path: Path) -> None:
 
     for r in rows:
         c = r["config"]
+        rerank_model = c.get("llm_model") or c.get("reranker_model", "")
         cfg_vals = [
             r.get("run_name", ""),
             c.get("dataset", ""),
@@ -188,7 +192,7 @@ def _print_table(jsonl_path: Path) -> None:
             c.get("embed_model", "").split("/")[-1],
             c.get("retrieval_mode", ""),
             c.get("reranker", ""),
-            c.get("reranker_model", "").split("/")[-1],
+            str(rerank_model).split("/")[-1],
         ]
         metric_vals = [
             f"{r['metrics'].get(k, 0):.4f}" for k in metric_keys

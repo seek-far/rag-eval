@@ -7,8 +7,11 @@ This is slower than bi-encoder retrieval but more accurate.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
+import urllib.error
+import urllib.request
 
 from sentence_transformers import CrossEncoder
 
@@ -24,6 +27,8 @@ _COMPARE_DOWN = {
     "decrease", "decreases", "decreased", "reduce", "reduces", "reduced",
     "lower", "less", "inhibit", "inhibits", "inhibited",
 }
+
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -120,6 +125,144 @@ def _should_promote(challenger: dict, current: dict) -> bool:
     return challenger["token_overlap"] >= current["token_overlap"]
 
 
+def _chat_completions_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
+def _truncate_passage(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit(" ", 1)[0] + " ..."
+
+
+def _extract_llm_scores(content: str) -> dict[int, float]:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        match = _JSON_OBJECT_RE.search(content)
+        if not match:
+            raise ValueError(f"LLM reranker did not return JSON: {content!r}")
+        payload = json.loads(match.group(0))
+
+    raw_scores = payload.get("scores")
+    if not isinstance(raw_scores, list):
+        raise ValueError(f"LLM reranker JSON missing 'scores' list: {payload!r}")
+
+    scores: dict[int, float] = {}
+    for item in raw_scores:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("index")
+        score = item.get("score")
+        try:
+            scores[int(idx)] = float(score)
+        except (TypeError, ValueError):
+            continue
+    if not scores:
+        raise ValueError(f"LLM reranker returned no usable scores: {payload!r}")
+    return scores
+
+
+class LLMReranker:
+    def __init__(self, cfg):
+        if not cfg.llm_base_url:
+            raise ValueError("LLM_BASE_URL is required when RERANKER=llm-cross-encoder")
+        if not cfg.llm_model:
+            raise ValueError("LLM_MODEL is required when RERANKER=llm-cross-encoder")
+        self.url = _chat_completions_url(cfg.llm_base_url)
+        self.api_key = cfg.llm_api_key
+        self.model = cfg.llm_model
+        self.temperature = cfg.llm_temperature
+        self.max_tokens = cfg.llm_max_tokens
+        self.timeout = cfg.llm_timeout
+        self.max_chars = cfg.llm_rerank_max_chars
+        logger.info(
+            "Using OpenAI-compatible LLM reranker '%s' at %s.",
+            self.model,
+            self.url,
+        )
+
+    def rerank(self, query: str, chunks: list[dict]) -> list[dict]:
+        if not chunks:
+            return chunks
+
+        candidates = []
+        for idx, chunk in enumerate(chunks, start=1):
+            candidates.append(
+                {
+                    "index": idx,
+                    "doc_id": chunk.get("doc_id", ""),
+                    "text": _truncate_passage(chunk["text"], self.max_chars),
+                }
+            )
+
+        content = self._score_candidates(query, candidates)
+        scores = _extract_llm_scores(content)
+
+        scored_chunks = []
+        for idx, chunk in enumerate(chunks, start=1):
+            row = dict(chunk)
+            row["rerank_score"] = float(scores.get(idx, -1.0))
+            scored_chunks.append(row)
+
+        return sorted(scored_chunks, key=lambda c: c["rerank_score"], reverse=True)
+
+    def _score_candidates(self, query: str, candidates: list[dict]) -> str:
+        payload = {
+            "model": self.model,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict cross-encoder style reranker. "
+                        "Score how well each candidate passage supports or answers the query. "
+                        "Use 0 for unrelated, 50 for partially relevant, and 100 for directly relevant. "
+                        "Return JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Query:\n"
+                        f"{query}\n\n"
+                        "Candidates:\n"
+                        f"{json.dumps(candidates, ensure_ascii=False)}\n\n"
+                        'Return exactly this JSON shape: {"scores":[{"index":1,"score":0.0}]}'
+                    ),
+                },
+            ],
+        }
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        request = urllib.request.Request(
+            self.url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"LLM reranker request failed: HTTP {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"LLM reranker request failed: {exc}") from exc
+
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"Unexpected LLM reranker response: {data!r}") from exc
+
+
 class Reranker:
     def __init__(self, cfg):
         self.mode = cfg.reranker
@@ -129,6 +272,9 @@ class Reranker:
         if self.mode == "rule-top3":
             self._model = None
             logger.info("Using lightweight rule-based top-3 reranker.")
+            return
+        if self.mode in {"llm", "llm-cross-encoder"}:
+            self._model = LLMReranker(cfg)
             return
         logger.info(
             "Loading reranker '%s' on %s ...", cfg.reranker_model, cfg.embed_device
@@ -163,6 +309,8 @@ class Reranker:
                     head[0], head[best_idx] = head[best_idx], head[0]
                     features[0], features[best_idx] = features[best_idx], features[0]
             return head + tail
+        if self.mode in {"llm", "llm-cross-encoder"}:
+            return self._model.rerank(query, chunks)
 
         pairs = [(query, c["text"]) for c in chunks]
         scores = self._model.predict(pairs, show_progress_bar=False)

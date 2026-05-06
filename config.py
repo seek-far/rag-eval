@@ -83,6 +83,13 @@ class Config:
         "RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
     )
     rerank_top_k: int = int(os.getenv("RERANK_TOP_K", "5"))
+    llm_base_url: str = os.getenv("LLM_BASE_URL", "")
+    llm_api_key: str = os.getenv("LLM_API_KEY", "")
+    llm_model: str = os.getenv("LLM_MODEL", "")
+    llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0"))
+    llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+    llm_timeout: float = float(os.getenv("LLM_TIMEOUT", "60"))
+    llm_rerank_max_chars: int = int(os.getenv("LLM_RERANK_MAX_CHARS", "1500"))
 
     # ── Eval ─────────────────────────────────────────────────────────────────
     metrics: list = field(
@@ -166,6 +173,8 @@ class Config:
             f"dense={self.dense_weight}, sparse={self.sparse_weight})\n"
             f"  reranker       : {self.reranker} "
             f"(model={self.reranker_model}, top_k={self.rerank_top_k})\n"
+            f"  llm_reranker   : model={self.llm_model or '-'} "
+            f"(base_url={self.llm_base_url or '-'}, max_chars={self.llm_rerank_max_chars})\n"
             f"  metrics        : {', '.join(self.metrics)} "
             f"@ k={self.k_values}\n"
             f"  run_name       : {self.run_name}\n"

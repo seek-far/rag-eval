@@ -90,6 +90,9 @@ class Config:
     llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
     llm_timeout: float = float(os.getenv("LLM_TIMEOUT", "60"))
     llm_rerank_max_chars: int = int(os.getenv("LLM_RERANK_MAX_CHARS", "1500"))
+    llm_rerank_workers: int = int(os.getenv("LLM_RERANK_WORKERS", "1"))
+    llm_rerank_retries: int = int(os.getenv("LLM_RERANK_RETRIES", "2"))
+    llm_rerank_retry_sleep: float = float(os.getenv("LLM_RERANK_RETRY_SLEEP", "2"))
 
     # ── Eval ─────────────────────────────────────────────────────────────────
     metrics: list = field(
@@ -174,7 +177,8 @@ class Config:
             f"  reranker       : {self.reranker} "
             f"(model={self.reranker_model}, top_k={self.rerank_top_k})\n"
             f"  llm_reranker   : model={self.llm_model or '-'} "
-            f"(base_url={self.llm_base_url or '-'}, max_chars={self.llm_rerank_max_chars})\n"
+            f"(base_url={self.llm_base_url or '-'}, workers={self.llm_rerank_workers}, "
+            f"max_chars={self.llm_rerank_max_chars})\n"
             f"  metrics        : {', '.join(self.metrics)} "
             f"@ k={self.k_values}\n"
             f"  run_name       : {self.run_name}\n"

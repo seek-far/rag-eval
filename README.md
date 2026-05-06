@@ -151,6 +151,9 @@ acronyms, numbers) — BM25 handles exact matches that dense embeddings can miss
 | `LLM_TEMPERATURE` | `0` | Low temperature is recommended for stable reranking |
 | `LLM_MAX_TOKENS` | `4096` | Maximum response tokens for the JSON score payload |
 | `LLM_TIMEOUT` | `60` | Request timeout in seconds |
+| `LLM_RERANK_WORKERS` | `1` | Number of concurrent LLM rerank requests; use `2` or `4` cautiously for slower APIs |
+| `LLM_RERANK_RETRIES` | `2` | Retry count for transient LLM reranker request failures |
+| `LLM_RERANK_RETRY_SLEEP` | `2` | Base retry sleep in seconds; retries use a simple linear backoff |
 | `LLM_RERANK_MAX_CHARS` | `1500` | Per-candidate passage truncation before sending to the LLM; `0` disables truncation |
 
 **Reranker model options:**
@@ -166,6 +169,8 @@ Set `RERANKER=llm-cross-encoder` to score each retrieved candidate with a
 chat-completions compatible model. The reranker sends the query and retrieved
 candidate chunks to `LLM_BASE_URL/chat/completions`, expects a JSON score list,
 adds `rerank_score` to each chunk, and sorts candidates by that score.
+When `LLM_RERANK_WORKERS > 1`, retrieval stays sequential and only the slow LLM
+rerank calls are evaluated concurrently.
 
 ### Evaluation metrics
 

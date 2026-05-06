@@ -59,6 +59,7 @@ def save_run(
             "rerank_top_k": cfg.rerank_top_k,
             "llm_base_url": cfg.llm_base_url,
             "llm_model": cfg.llm_model,
+            "llm_rerank_workers": cfg.llm_rerank_workers,
         },
         "n_samples": len(per_sample),
         "metrics": agg,

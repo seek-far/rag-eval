@@ -8,6 +8,7 @@ Usage:
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import pickle
 import sys
@@ -152,6 +153,89 @@ def _corpus_summary(samples, unique_chunks: list[dict], cfg) -> dict:
     }
 
 
+def _evaluate_sample_from_candidates(
+    sample,
+    candidates: list[dict],
+    retrieval_trace: dict,
+    retrieved_pre_rerank: list[dict],
+    reranker,
+    cfg,
+) -> tuple[dict, dict]:
+    # Rerank
+    if reranker is not None:
+        candidates = reranker.rerank(sample.query, candidates)
+        candidates = candidates[: cfg.rerank_top_k]
+
+    # Deduplicate doc_ids while preserving rank order
+    seen_doc_ids: set[str] = set()
+    retrieved_ids: list[str] = []
+    for c in candidates:
+        if c["doc_id"] not in seen_doc_ids:
+            seen_doc_ids.add(c["doc_id"])
+            retrieved_ids.append(c["doc_id"])
+
+    result: dict[str, float] = {}
+    predicted = ""
+
+    # Retrieval metrics (need relevant_doc_ids)
+    if sample.relevant_doc_ids:
+        result.update(
+            compute_retrieval_metrics(
+                retrieved_ids,
+                sample.relevant_doc_ids,
+                cfg.k_values,
+                cfg.metrics,
+            )
+        )
+
+    # Answer-in-context (need answer_spans)
+    if sample.answer_spans and candidates:
+        chunk_texts = [c["text"] for c in candidates]
+        result.update(
+            compute_context_metrics(chunk_texts, sample.answer_spans, cfg.k_values)
+        )
+
+    # Answer-quality metrics (need reference_answer)
+    if sample.reference_answer and candidates:
+        # Use the top-1 retrieved chunk text as the predicted answer
+        predicted = candidates[0]["text"]
+        result.update(
+            compute_answer_metrics(
+                predicted,
+                sample.reference_answer,
+                cfg.metrics,
+            )
+        )
+
+    final_candidates = [
+        _snapshot_chunk(c, rank=rank, relevant_doc_ids=sample.relevant_doc_ids)
+        for rank, c in enumerate(candidates, start=1)
+    ]
+    sample_result = {
+        "sample_id": sample.id,
+        "query": sample.query,
+        "document_count": len(sample.documents),
+        "relevant_doc_ids": sample.relevant_doc_ids,
+        "retrieved_doc_ids": retrieved_ids,
+        "predicted_answer": predicted,
+        "reference_answer": sample.reference_answer,
+        "answer_spans": sample.answer_spans,
+        "metrics": result,
+        "pre_rerank_candidates": retrieved_pre_rerank,
+        "final_candidates": final_candidates,
+    }
+    retrieval_row = {
+        "sample_id": sample.id,
+        "query": sample.query,
+        "retrieval_mode": cfg.retrieval_mode,
+        "retrieval_trace": retrieval_trace,
+        "pre_rerank_candidates": retrieved_pre_rerank,
+        "final_candidates": final_candidates,
+        "retrieved_doc_ids": retrieved_ids,
+    }
+    return sample_result, retrieval_row
+
+
 def main() -> None:
     if "--help" in sys.argv or "-h" in sys.argv:
         cfg = Config()
@@ -224,89 +308,66 @@ def main() -> None:
     sample_inputs: list[dict] = [_sample_input_row(sample) for sample in samples]
     retrieval_traces: list[dict] = []
 
-    for sample in tqdm(samples, desc="Evaluating", unit="query"):
+    work_items: list[tuple] = []
+    for sample in tqdm(samples, desc="Retrieving", unit="query"):
         # Retrieve
         candidates, retrieval_trace = _build_retrieval_trace(retriever, sample.query, chunk_map)
         retrieved_pre_rerank = [
             _snapshot_chunk(c, rank=rank, relevant_doc_ids=sample.relevant_doc_ids)
             for rank, c in enumerate(candidates, start=1)
         ]
+        work_items.append((sample, candidates, retrieval_trace, retrieved_pre_rerank))
 
-        # Rerank
-        if reranker is not None:
-            candidates = reranker.rerank(sample.query, candidates)
-            candidates = candidates[: cfg.rerank_top_k]
-
-        # Deduplicate doc_ids while preserving rank order
-        seen_doc_ids: set[str] = set()
-        retrieved_ids: list[str] = []
-        for c in candidates:
-            if c["doc_id"] not in seen_doc_ids:
-                seen_doc_ids.add(c["doc_id"])
-                retrieved_ids.append(c["doc_id"])
-
-        result: dict[str, float] = {}
-        predicted = ""
-
-        # Retrieval metrics (need relevant_doc_ids)
-        if sample.relevant_doc_ids:
-            result.update(
-                compute_retrieval_metrics(
-                    retrieved_ids,
-                    sample.relevant_doc_ids,
-                    cfg.k_values,
-                    cfg.metrics,
-                )
-            )
-
-        # Answer-in-context (need answer_spans)
-        if sample.answer_spans and candidates:
-            chunk_texts = [c["text"] for c in candidates]
-            result.update(
-                compute_context_metrics(chunk_texts, sample.answer_spans, cfg.k_values)
-            )
-
-        # Answer-quality metrics (need reference_answer)
-        if sample.reference_answer and candidates:
-            # Use the top-1 retrieved chunk text as the predicted answer
-            predicted = candidates[0]["text"]
-            result.update(
-                compute_answer_metrics(
-                    predicted,
-                    sample.reference_answer,
-                    cfg.metrics,
-                )
-            )
-
-        final_candidates = [
-            _snapshot_chunk(c, rank=rank, relevant_doc_ids=sample.relevant_doc_ids)
-            for rank, c in enumerate(candidates, start=1)
-        ]
-        sample_result = {
-            "sample_id": sample.id,
-            "query": sample.query,
-            "document_count": len(sample.documents),
-            "relevant_doc_ids": sample.relevant_doc_ids,
-            "retrieved_doc_ids": retrieved_ids,
-            "predicted_answer": predicted,
-            "reference_answer": sample.reference_answer,
-            "answer_spans": sample.answer_spans,
-            "metrics": result,
-            "pre_rerank_candidates": retrieved_pre_rerank,
-            "final_candidates": final_candidates,
-        }
-        per_sample_results.append(sample_result)
-        retrieval_traces.append(
-            {
-                "sample_id": sample.id,
-                "query": sample.query,
-                "retrieval_mode": cfg.retrieval_mode,
-                "retrieval_trace": retrieval_trace,
-                "pre_rerank_candidates": retrieved_pre_rerank,
-                "final_candidates": final_candidates,
-                "retrieved_doc_ids": retrieved_ids,
+    llm_parallel = (
+        cfg.reranker in {"llm", "llm-cross-encoder"}
+        and reranker is not None
+        and cfg.llm_rerank_workers > 1
+    )
+    if llm_parallel:
+        workers = min(cfg.llm_rerank_workers, len(work_items))
+        logger.info("Evaluating with %d LLM reranker workers.", workers)
+        ordered_results: list[tuple[dict, dict] | None] = [None] * len(work_items)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    _evaluate_sample_from_candidates,
+                    sample,
+                    candidates,
+                    retrieval_trace,
+                    retrieved_pre_rerank,
+                    reranker,
+                    cfg,
+                ): idx
+                for idx, (sample, candidates, retrieval_trace, retrieved_pre_rerank)
+                in enumerate(work_items)
             }
-        )
+            for future in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Evaluating",
+                unit="query",
+            ):
+                ordered_results[futures[future]] = future.result()
+        for row in ordered_results:
+            sample_result, retrieval_row = row
+            per_sample_results.append(sample_result)
+            retrieval_traces.append(retrieval_row)
+    else:
+        for sample, candidates, retrieval_trace, retrieved_pre_rerank in tqdm(
+            work_items,
+            desc="Evaluating",
+            unit="query",
+        ):
+            sample_result, retrieval_row = _evaluate_sample_from_candidates(
+                sample,
+                candidates,
+                retrieval_trace,
+                retrieved_pre_rerank,
+                reranker,
+                cfg,
+            )
+            per_sample_results.append(sample_result)
+            retrieval_traces.append(retrieval_row)
 
     # ── 5. Aggregate and save ─────────────────────────────────────────────
     metric_rows = [row["metrics"] for row in per_sample_results]
@@ -362,6 +423,9 @@ def main() -> None:
             "llm_max_tokens": cfg.llm_max_tokens,
             "llm_timeout": cfg.llm_timeout,
             "llm_rerank_max_chars": cfg.llm_rerank_max_chars,
+            "llm_rerank_workers": cfg.llm_rerank_workers,
+            "llm_rerank_retries": cfg.llm_rerank_retries,
+            "llm_rerank_retry_sleep": cfg.llm_rerank_retry_sleep,
             "metrics": cfg.metrics,
             "k_values": cfg.k_values,
             "results_dir": cfg.results_dir,

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -179,6 +180,8 @@ class LLMReranker:
         self.max_tokens = cfg.llm_max_tokens
         self.timeout = cfg.llm_timeout
         self.max_chars = cfg.llm_rerank_max_chars
+        self.retries = max(0, cfg.llm_rerank_retries)
+        self.retry_sleep = max(0.0, cfg.llm_rerank_retry_sleep)
         logger.info(
             "Using OpenAI-compatible LLM reranker '%s' at %s.",
             self.model,
@@ -248,14 +251,29 @@ class LLMReranker:
             headers=headers,
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"LLM reranker request failed: HTTP {exc.code}: {body}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"LLM reranker request failed: {exc}") from exc
+        last_error: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                last_error = RuntimeError(
+                    f"LLM reranker request failed: HTTP {exc.code}: {body}"
+                )
+            except urllib.error.URLError as exc:
+                last_error = RuntimeError(f"LLM reranker request failed: {exc}")
+            if attempt < self.retries:
+                sleep_for = self.retry_sleep * (attempt + 1)
+                logger.warning(
+                    "LLM reranker request failed (%s); retrying in %.1fs.",
+                    last_error,
+                    sleep_for,
+                )
+                time.sleep(sleep_for)
+        else:
+            raise last_error or RuntimeError("LLM reranker request failed.")
 
         try:
             return data["choices"][0]["message"]["content"]

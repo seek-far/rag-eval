@@ -172,6 +172,21 @@ adds `rerank_score` to each chunk, and sorts candidates by that score.
 When `LLM_RERANK_WORKERS > 1`, retrieval stays sequential and only the slow LLM
 rerank calls are evaluated concurrently.
 
+**LLM reranker concurrency and failure handling:**
+
+The LLM reranker is latency-bound, so query-level concurrency can make full
+evaluations much faster. On the 300-sample SciFact run with `deepseek-v4-pro`,
+a single LLM rerank request took about `39.1s`. A 50-worker run completed in
+`7.86 min`, compared with a sequential estimate of about `195.7 min`, for an
+approximate `24.9x` wall-clock speedup. The test ran during an idle period in
+China local time, so daytime or peak-hour latency may be worse.
+
+Operational observations:
+- `LLM_RERANK_WORKERS=2` worked on a smoke test and overlapped calls cleanly.
+- `LLM_RERANK_WORKERS=10` improved early throughput, but one long response timed out before broader retry handling was added.
+- `LLM_RERANK_WORKERS=50` was fastest, but triggered empty, truncated, or malformed JSON responses from the endpoint; parser retries were required for a successful full run.
+- For rainy-day scenarios, keep `LLM_RERANK_RETRIES` enabled, raise `LLM_TIMEOUT` for slow reasoning models, and expect occasional malformed or empty model outputs under high concurrency.
+
 ### Evaluation metrics
 
 | Variable | Default |

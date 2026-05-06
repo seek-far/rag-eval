@@ -202,8 +202,7 @@ class LLMReranker:
                 }
             )
 
-        content = self._score_candidates(query, candidates)
-        scores = _extract_llm_scores(content)
+        scores = self._score_with_retries(query, candidates)
 
         scored_chunks = []
         for idx, chunk in enumerate(chunks, start=1):
@@ -212,6 +211,24 @@ class LLMReranker:
             scored_chunks.append(row)
 
         return sorted(scored_chunks, key=lambda c: c["rerank_score"], reverse=True)
+
+    def _score_with_retries(self, query: str, candidates: list[dict]) -> dict[int, float]:
+        last_error: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                content = self._score_candidates(query, candidates)
+                return _extract_llm_scores(content)
+            except ValueError as exc:
+                last_error = exc
+                if attempt < self.retries:
+                    sleep_for = self.retry_sleep * (attempt + 1)
+                    logger.warning(
+                        "LLM reranker returned unparsable scores (%s); retrying in %.1fs.",
+                        exc,
+                        sleep_for,
+                    )
+                    time.sleep(sleep_for)
+        raise last_error or RuntimeError("LLM reranker returned no usable scores.")
 
     def _score_candidates(self, query: str, candidates: list[dict]) -> str:
         payload = {
@@ -262,8 +279,10 @@ class LLMReranker:
                 last_error = RuntimeError(
                     f"LLM reranker request failed: HTTP {exc.code}: {body}"
                 )
-            except urllib.error.URLError as exc:
+            except (TimeoutError, urllib.error.URLError, OSError) as exc:
                 last_error = RuntimeError(f"LLM reranker request failed: {exc}")
+            except json.JSONDecodeError as exc:
+                last_error = RuntimeError(f"LLM reranker returned invalid JSON response: {exc}")
             if attempt < self.retries:
                 sleep_for = self.retry_sleep * (attempt + 1)
                 logger.warning(

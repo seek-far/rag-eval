@@ -268,6 +268,17 @@ Example write-up:
 - [Natural Questions ablation summary (400 samples)](docs/nq_400_ablation_summary.md)
 - [SciFact ablation summary (300 samples)](docs/scifact_300_ablation_summary.md)
 
+The SciFact summary also records the later cross-encoder work: MedCPT,
+BiomedBERT, BGE reranker large, OpenAI-compatible LLM CE with concurrency,
+failure-overlap analysis, offline score-fusion replay, and learned top-1 fusion
+from saved artifacts.
+The best single-model top-1 run was LLM CE at `MRR@1 = 0.8500`; the best
+test-set-tuned offline score fusion reached `MRR@1 = 0.8600`, while a more
+conservative 5-fold fixed-weight fusion replay reached `MRR@1 = 0.8534`,
+`MRR@10 = 0.8975`, and `Recall@5 = 0.9500`. The first learned-fusion replay
+improved that conservative result to `MRR@1 = 0.8600`, `MRR@10 = 0.9059`,
+and `Recall@5 = 0.9572`.
+
 ---
 
 ## Utility scripts
@@ -277,6 +288,7 @@ These helper scripts are useful when inspecting runs beyond the aggregate table:
 - `python utils/browse_data.py` - inspect dataset samples and fields
 - `python utils/trace_query.py` - inspect retrieval / rerank traces for a query
 - `python utils/case_analysis.py` - review per-sample successes and failures
+- `python utils/offline_learned_fusion.py` - train/evaluate learned fusion from saved reranker artifacts without rerunning retrieval or LLM calls
 
 ---
 
